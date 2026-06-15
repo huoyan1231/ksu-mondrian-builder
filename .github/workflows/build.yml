@@ -1,10 +1,68 @@
-name: KernelSU / KernelSU-Next LKM CI (Mondrian)
+name: KernelSU / KernelSU-Next / SukiSU LKM CI (Mondrian)
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '0 */24 * * *'
 
 jobs:
-  lkm-builder:
+  check-updates:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.check.outputs.should_build }}
+    steps:
+      - name: Restore previous SHAs
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/previous_shas
+          key: upstream-shas-${{ github.run_id }}
+          restore-keys: upstream-shas-
+
+      - name: Check upstream repos for changes
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          repos=(
+            "tiann/KernelSU"
+            "KernelSU-Next/KernelSU-Next"
+            "SukiSU-Ultra/SukiSU-Ultra"
+            "LineageOS/android_kernel_xiaomi_sm8450"
+            "nyxiereal/android_kernel_xiaomi_sm8450"
+          )
+
+          CURRENT_SHAS=""
+          for repo in "${repos[@]}"; do
+            sha=$(git ls-remote "https://github.com/${repo}" HEAD | cut -f1)
+            CURRENT_SHAS="${CURRENT_SHAS}${repo}:${sha}\n"
+          done
+
+          CACHE_FILE="${{ runner.temp }}/previous_shas"
+          CURRENT_FILE="${{ runner.temp }}/current_shas"
+          echo -e "$CURRENT_SHAS" > "$CURRENT_FILE"
+
+          if [[ -f "$CACHE_FILE" ]]; then
+            if diff -q "$CACHE_FILE" "$CURRENT_FILE" > /dev/null 2>&1; then
+              echo "should_build=false" >> "$GITHUB_OUTPUT"
+              echo "No upstream changes detected."
+            else
+              echo "should_build=true" >> "$GITHUB_OUTPUT"
+              echo "Upstream changes detected!"
+            fi
+          else
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            echo "No previous cache found — triggering build."
+          fi
+
+      - name: Save current SHAs
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/current_shas
+          key: upstream-shas-${{ github.run_id }}
+
+  build:
+    needs: check-updates
+    if: needs.check-updates.outputs.should_build == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
 
     steps:
@@ -16,35 +74,37 @@ jobs:
             bc flex bison libssl-dev \
             zip unzip
 
-      - name: Clone Kernel
-        run: |
-          git clone --depth=1 \
-            https://github.com/LineageOS/android_kernel_xiaomi_sm8450 kernel
-
       - name: Setup ast-grep
         run: |
-          cd kernel
           curl -L https://github.com/ast-grep/ast-grep/releases/download/0.39.6/app-x86_64-unknown-linux-gnu.zip \
             -o /tmp/astgrep.zip
-          unzip -j /tmp/astgrep.zip 'ast-grep'
-          chmod +x ast-grep
+          unzip -j /tmp/astgrep.zip 'ast-grep' -d /usr/local/bin
+          chmod +x /usr/local/bin/ast-grep
           rm /tmp/astgrep.zip
 
-      - name: Build KSU LKM
+      - name: Clone LineageOS Kernel
         run: |
-          cd kernel
+          git clone --depth=1 \
+            https://github.com/LineageOS/android_kernel_xiaomi_sm8450 kernel-lineage
 
-          # 1. Apply KSU integration
+      - name: Clone nyxx Kernel
+        run: |
+          git clone --depth=1 \
+            https://github.com/nyxiereal/android_kernel_xiaomi_sm8450 kernel-nyxx
+
+      # ── LineageOS kernel builds ──────────────────────────────
+
+      - name: "[LineageOS] Build KSU LKM"
+        run: |
+          cd kernel-lineage
+
           curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -
 
-          # 2. Patch modpost to allow out-of-tree symbol resolution
-          ./ast-grep -U -p '$$$ check_exports($$$) {$$$}' -r '' scripts/mod/modpost.c
-          ./ast-grep -U -p 'check_exports($$$);'           -r '' scripts/mod/modpost.c
+          ast-grep -U -p '$$$ check_exports($$$) {$$$}' -r '' scripts/mod/modpost.c
+          ast-grep -U -p 'check_exports($$$);'           -r '' scripts/mod/modpost.c
 
-          # 3. Change KSU Kconfig default from built-in to module
           sed -i '/config KSU/,/help/{s/default y/default m/}' drivers/kernelsu/Kconfig
 
-          # 4. Generate base config with mondrian vendor fragment
           make -j$(nproc) \
             ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- \
             O=out gki_defconfig
@@ -53,20 +113,16 @@ jobs:
             out/.config \
             arch/arm64/configs/vendor/mondrian_GKI.config
 
-          # 5. Force CONFIG_KSU=m before olddefconfig so it never prompts
-          #    or silently defaults to built-in
           echo "CONFIG_KSU=m" >> out/.config
 
           make -j$(nproc) \
             ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- \
             O=out olddefconfig
 
-          # 6. Prepare headers and module scaffolding with KSU now in config
           make -j$(nproc) \
             ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- \
             O=out prepare modules_prepare
 
-          # 7. Build the module
           make -j$(nproc) \
             ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- \
             O=out \
@@ -75,25 +131,20 @@ jobs:
 
           llvm-objcopy --strip-debug out/drivers/kernelsu/kernelsu.ko ./kernelsu.ko
 
-          # 8. Clean KSU integration and restore tree before KSUN build
           rm -rf KernelSU/ drivers/kernelsu
           git restore drivers/ scripts/
 
-      - name: Build KSUN LKM
+      - name: "[LineageOS] Build KSUN LKM"
         run: |
-          cd kernel
+          cd kernel-lineage
 
-          # 1. Apply KSUN integration
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -
 
-          # 2. Patch modpost
-          ./ast-grep -U -p '$$$ check_exports($$$) {$$$}' -r '' scripts/mod/modpost.c
-          ./ast-grep -U -p 'check_exports($$$);'           -r '' scripts/mod/modpost.c
+          ast-grep -U -p '$$$ check_exports($$$) {$$$}' -r '' scripts/mod/modpost.c
+          ast-grep -U -p 'check_exports($$$);'           -r '' scripts/mod/modpost.c
 
-          # 3. Change KSU Kconfig default to module
           sed -i '/config KSU/,/help/{s/default y/default m/}' drivers/kernelsu/Kconfig
 
-          # 4. Fresh config into out2/ — keeps KSUN artifacts separate from KSU
           make -j$(nproc) \
             ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- \
             O=out2 gki_defconfig
@@ -102,19 +153,16 @@ jobs:
             out2/.config \
             arch/arm64/configs/vendor/mondrian_GKI.config
 
-          # 5. Force CONFIG_KSU=m
           echo "CONFIG_KSU=m" >> out2/.config
 
           make -j$(nproc) \
             ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- \
             O=out2 olddefconfig
 
-          # 6. Prepare
           make -j$(nproc) \
             ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- \
             O=out2 prepare modules_prepare
 
-          # 7. Build
           make -j$(nproc) \
             ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- \
             O=out2 \
@@ -123,20 +171,193 @@ jobs:
 
           llvm-objcopy --strip-debug out2/drivers/kernelsu/kernelsu.ko ./kernelsu_next.ko
 
-          echo "DATE=$(date -u '+%Y%d%m%I%M')" >> $GITHUB_ENV
+          rm -rf KernelSU/ drivers/kernelsu
+          git restore drivers/ scripts/
+
+      - name: "[LineageOS] Build SukiSU LKM"
+        run: |
+          cd kernel-lineage
+
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main
+
+          ast-grep -U -p '$$$ check_exports($$$) {$$$}' -r '' scripts/mod/modpost.c
+          ast-grep -U -p 'check_exports($$$);'           -r '' scripts/mod/modpost.c
+
+          sed -i '/config KSU/,/help/{s/default y/default m/}' drivers/kernelsu/Kconfig
+
+          make -j$(nproc) \
+            ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- \
+            O=out3 gki_defconfig
+
+          ./scripts/kconfig/merge_config.sh -m -O out3 \
+            out3/.config \
+            arch/arm64/configs/vendor/mondrian_GKI.config
+
+          echo "CONFIG_KSU=m" >> out3/.config
+
+          make -j$(nproc) \
+            ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- \
+            O=out3 olddefconfig
+
+          make -j$(nproc) \
+            ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- \
+            O=out3 prepare modules_prepare
+
+          make -j$(nproc) \
+            ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- \
+            O=out3 \
+            security/ \
+            drivers/kernelsu/kernelsu.ko
+
+          llvm-objcopy --strip-debug out3/drivers/kernelsu/kernelsu.ko ./sukisu.ko
+
+      # ── nyxx kernel builds ───────────────────────────────────
+
+      - name: "[nyxx] Build KSU LKM"
+        run: |
+          cd kernel-nyxx
+
+          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -
+
+          ast-grep -U -p '$$$ check_exports($$$) {$$$}' -r '' scripts/mod/modpost.c
+          ast-grep -U -p 'check_exports($$$);'           -r '' scripts/mod/modpost.c
+
+          sed -i '/config KSU/,/help/{s/default y/default m/}' drivers/kernelsu/Kconfig
+
+          make -j$(nproc) \
+            ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- \
+            O=out gki_defconfig
+
+          ./scripts/kconfig/merge_config.sh -m -O out \
+            out/.config \
+            arch/arm64/configs/vendor/mondrian_GKI.config
+
+          echo "CONFIG_KSU=m" >> out/.config
+
+          make -j$(nproc) \
+            ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- \
+            O=out olddefconfig
+
+          make -j$(nproc) \
+            ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- \
+            O=out prepare modules_prepare
+
+          make -j$(nproc) \
+            ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- \
+            O=out \
+            security/ \
+            drivers/kernelsu/kernelsu.ko
+
+          llvm-objcopy --strip-debug out/drivers/kernelsu/kernelsu.ko ./nyxx_kernelsu.ko
+
+          rm -rf KernelSU/ drivers/kernelsu
+          git restore drivers/ scripts/
+
+      - name: "[nyxx] Build KSUN LKM"
+        run: |
+          cd kernel-nyxx
+
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -
+
+          ast-grep -U -p '$$$ check_exports($$$) {$$$}' -r '' scripts/mod/modpost.c
+          ast-grep -U -p 'check_exports($$$);'           -r '' scripts/mod/modpost.c
+
+          sed -i '/config KSU/,/help/{s/default y/default m/}' drivers/kernelsu/Kconfig
+
+          make -j$(nproc) \
+            ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- \
+            O=out2 gki_defconfig
+
+          ./scripts/kconfig/merge_config.sh -m -O out2 \
+            out2/.config \
+            arch/arm64/configs/vendor/mondrian_GKI.config
+
+          echo "CONFIG_KSU=m" >> out2/.config
+
+          make -j$(nproc) \
+            ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- \
+            O=out2 olddefconfig
+
+          make -j$(nproc) \
+            ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- \
+            O=out2 prepare modules_prepare
+
+          make -j$(nproc) \
+            ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- \
+            O=out2 \
+            security/ \
+            drivers/kernelsu/kernelsu.ko
+
+          llvm-objcopy --strip-debug out2/drivers/kernelsu/kernelsu.ko ./nyxx_kernelsu_next.ko
+
+          rm -rf KernelSU/ drivers/kernelsu
+          git restore drivers/ scripts/
+
+      - name: "[nyxx] Build SukiSU LKM"
+        run: |
+          cd kernel-nyxx
+
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main
+
+          ast-grep -U -p '$$$ check_exports($$$) {$$$}' -r '' scripts/mod/modpost.c
+          ast-grep -U -p 'check_exports($$$);'           -r '' scripts/mod/modpost.c
+
+          sed -i '/config KSU/,/help/{s/default y/default m/}' drivers/kernelsu/Kconfig
+
+          make -j$(nproc) \
+            ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- \
+            O=out3 gki_defconfig
+
+          ./scripts/kconfig/merge_config.sh -m -O out3 \
+            out3/.config \
+            arch/arm64/configs/vendor/mondrian_GKI.config
+
+          echo "CONFIG_KSU=m" >> out3/.config
+
+          make -j$(nproc) \
+            ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- \
+            O=out3 olddefconfig
+
+          make -j$(nproc) \
+            ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- \
+            O=out3 prepare modules_prepare
+
+          make -j$(nproc) \
+            ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- \
+            O=out3 \
+            security/ \
+            drivers/kernelsu/kernelsu.ko
+
+          llvm-objcopy --strip-debug out3/drivers/kernelsu/kernelsu.ko ./nyxx_sukisu.ko
+
+      # ── Verify & Release ─────────────────────────────────────
 
       - name: Verify Artifacts
         run: |
-          file kernel/kernelsu.ko
-          file kernel/kernelsu_next.ko
+          file kernel-lineage/kernelsu.ko
+          file kernel-lineage/kernelsu_next.ko
+          file kernel-lineage/sukisu.ko
+          file kernel-nyxx/nyxx_kernelsu.ko
+          file kernel-nyxx/nyxx_kernelsu_next.ko
+          file kernel-nyxx/nyxx_sukisu.ko
+
+      - name: Stage artifacts
+        run: |
+          mkdir -p artifacts
+          cp kernel-lineage/kernelsu.ko       artifacts/
+          cp kernel-lineage/kernelsu_next.ko  artifacts/
+          cp kernel-lineage/sukisu.ko         artifacts/
+          cp kernel-nyxx/nyxx_kernelsu.ko     artifacts/
+          cp kernel-nyxx/nyxx_kernelsu_next.ko artifacts/
+          cp kernel-nyxx/nyxx_sukisu.ko       artifacts/
 
       - name: Create Release
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
+          echo "DATE=$(date -u '+%Y%d%m%I%M')" >> $GITHUB_ENV
           gh release create "ksu_lkm-${{ env.DATE }}" \
             --repo nyxiereal/ksu-mondrian-builder \
-            --title "KernelSU / KernelSU-Next LKM for Poco F5 Pro (Mondrian)" \
-            --notes "Automated LKM build for mondrian (android12-5.10)" \
-            kernel/kernelsu.ko \
-            kernel/kernelsu_next.ko
+            --title "KernelSU / KernelSU-Next / SukiSU LKM for Poco F5 Pro (Mondrian)" \
+            --notes "Automated LKM build for mondrian (android12-5.10) — lineage + nyxx kernels" \
+            artifacts/*

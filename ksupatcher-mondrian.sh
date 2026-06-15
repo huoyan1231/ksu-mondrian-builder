@@ -1,11 +1,11 @@
 #!/system/bin/sh
 
 # ─────────────────────────────────────────────
-#  KSU / KSUN Boot Patcher — Mondrian (Poco F5 Pro)
+#  KSU / KSUN / SukiSU Boot Patcher — Mondrian (Poco F5 Pro)
 #  KMI: android12-5.10 (GKI w/ vendor fragment)
 #
 #  .ko files:  nyxiereal/ksu-mondrian-builder
-#  ksud binary: upstream KSU / KSU-Next
+#  ksud binary: upstream KSU / KSU-Next / SukiSU
 # ─────────────────────────────────────────────
 
 WDIR=$(pwd)
@@ -29,18 +29,36 @@ fetch_latest_tag() {
 		| head -n1
 }
 
+# ── Detect running kernel ────────────────────
+detect_kernel() {
+	KVER=$(uname -r)
+	case ${KVER} in
+		*nyxx*) DETECTED_KERNEL="nyxx" ;;
+		*)      DETECTED_KERNEL="lineage" ;;
+	esac
+	log_info "Detected kernel: ${DETECTED_KERNEL} (uname: ${KVER})"
+}
+
 # ── Preflight checks ─────────────────────────
 if [[ ${WDIR} != /data/local/tmp ]]; then
 	die "Script needs to be placed in /data/local/tmp!"
 fi
 
 if [[ $# -lt 1 || $# -gt 2 ]]; then
-	echo -e "\e[1;33mUsage: $0 <ksu|ksun> [ota]\e[0m"
+	echo -e "\e[1;33mUsage: $0 <ksu|ksun|sukisu> [ota]\e[0m"
 	exit 1
 fi
 
 VARIANT=$1
 MODE=$2
+
+# ── Detect kernel and set .ko prefix ─────────
+detect_kernel
+if [[ ${DETECTED_KERNEL} == "nyxx" ]]; then
+	KO_PREFIX="nyxx_"
+else
+	KO_PREFIX=""
+fi
 
 # ── Resolve variant ──────────────────────────
 log_info "Resolving variant: ${VARIANT}"
@@ -48,14 +66,20 @@ log_info "Resolving variant: ${VARIANT}"
 case $VARIANT in
 ksu)
 	KSUD_REPO="tiann/KernelSU"
-	KSUM="kernelsu.ko"
+	KSUM="${KO_PREFIX}kernelsu.ko"
 	;;
 ksun)
 	KSUD_REPO="KernelSU-Next/KernelSU-Next"
-	KSUM="kernelsu_next.ko"
+	KSUM="${KO_PREFIX}kernelsu_next.ko"
+	NEED_UNZIP="1"
+	;;
+sukisu)
+	KSUD_REPO="SukiSU-Ultra/SukiSU-Ultra"
+	KSUM="${KO_PREFIX}sukisu.ko"
+	NEED_UNZIP="1"
 	;;
 *)
-	die "Unknown variant '${VARIANT}'. Available options: ksu | ksun"
+	die "Unknown variant '${VARIANT}'. Available options: ksu | ksun | sukisu"
 	;;
 esac
 
@@ -87,7 +111,7 @@ elif [[ ${MODE} == "ota" ]]; then
 	fi
 
 	if ! command -v su >/dev/null 2>&1; then
-		die "OTA mode requires root (KernelSU / KernelSU-Next) with superuser access granted to shell!"
+		die "OTA mode requires root (KernelSU / KernelSU-Next / SukiSU) with superuser access granted to shell!"
 	fi
 
 	curslot=$(getprop ro.boot.slot_suffix)
