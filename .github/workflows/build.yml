@@ -355,8 +355,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
-          echo "DATE=$(date -u '+%Y%d%m%I%M')" >> $GITHUB_ENV
-          gh release create "ksu_lkm-${{ env.DATE }}" \
+          DATE=$(date -u '+%Y%d%m%I%M')
+          gh release create "ksu_lkm-${DATE}" \
             --repo nyxiereal/ksu-mondrian-builder \
             --title "KernelSU / KernelSU-Next / SukiSU LKM for Poco F5 Pro (Mondrian)" \
             --notes "Automated LKM build for mondrian (android12-5.10) — lineage + nyxx kernels" \
