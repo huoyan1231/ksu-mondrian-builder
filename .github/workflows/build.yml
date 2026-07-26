@@ -28,7 +28,6 @@ jobs:
             "KernelSU-Next/KernelSU-Next"
             "SukiSU-Ultra/SukiSU-Ultra"
             "LineageOS/android_kernel_xiaomi_sm8450"
-            "nyxiereal/android_kernel_xiaomi_sm8450"
           )
 
           CURRENT_SHAS=""
@@ -86,11 +85,6 @@ jobs:
         run: |
           git clone --depth=1 \
             https://github.com/LineageOS/android_kernel_xiaomi_sm8450 kernel-lineage
-
-      - name: Clone nyxx Kernel
-        run: |
-          git clone --depth=1 \
-            https://github.com/nyxiereal/android_kernel_xiaomi_sm8450 kernel-nyxx
 
       # ── LineageOS kernel builds ──────────────────────────────
 
@@ -337,9 +331,6 @@ jobs:
           file kernel-lineage/kernelsu.ko
           file kernel-lineage/kernelsu_next.ko
           file kernel-lineage/sukisu.ko
-          file kernel-nyxx/nyxx_kernelsu.ko
-          file kernel-nyxx/nyxx_kernelsu_next.ko
-          file kernel-nyxx/nyxx_sukisu.ko
 
       - name: Stage artifacts
         run: |
@@ -347,9 +338,6 @@ jobs:
           cp kernel-lineage/kernelsu.ko       artifacts/
           cp kernel-lineage/kernelsu_next.ko  artifacts/
           cp kernel-lineage/sukisu.ko         artifacts/
-          cp kernel-nyxx/nyxx_kernelsu.ko     artifacts/
-          cp kernel-nyxx/nyxx_kernelsu_next.ko artifacts/
-          cp kernel-nyxx/nyxx_sukisu.ko       artifacts/
 
       - name: Create Release
         env:
@@ -357,7 +345,7 @@ jobs:
         run: |
           DATE=$(date -u '+%Y%d%m%I%M')
           gh release create "ksu_lkm-${DATE}" \
-            --repo nyxiereal/ksu-mondrian-builder \
+            --repo huoyan1231/ksu-mondrian-builder \
             --title "KernelSU / KernelSU-Next / SukiSU LKM for Poco F5 Pro (Mondrian)" \
-            --notes "Automated LKM build for mondrian (android12-5.10) — lineage + nyxx kernels" \
+            --notes "Automated LKM build for mondrian (android12-5.10) — lineage kernels" \
             artifacts/*
