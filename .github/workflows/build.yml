@@ -3,7 +3,7 @@ name: KernelSU / KernelSU-Next / SukiSU LKM CI (Mondrian)
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 */24 * * *'
+    - cron: '0 */48 * * *'
 
 jobs:
   check-updates:
