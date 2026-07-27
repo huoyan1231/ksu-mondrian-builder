@@ -1,5 +1,7 @@
 # KSU for mondrian
 
+# I haven't updated the README; some of the information in it is outdated.
+
 ## workflow
 
 The CI workflow builds kernel module files (`.ko`) for **mondrian** (Poco F5 Pro) against two kernels and three LKMs, then publishes them to GitHub releases.
